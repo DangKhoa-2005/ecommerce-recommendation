@@ -11,7 +11,7 @@ Dự án xây dựng hệ thống thương mại điện tử theo kiến trúc 
 ## 🎯 Mục tiêu hệ thống
 - Xây dựng hệ thống Backend E-commerce đáp ứng chuẩn kiến trúc **Microservices / SOA**.
 - Áp dụng nền tảng Cloud **Databricks** (Serverless Compute) để quản lý Big Data bằng kiến trúc **Medallion (Bronze, Silver, Gold)** của **Delta Lake**.
-- Tích hợp vòng lặp (Close the loop): Mang dữ liệu từ Data Lake cung cấp lại cho Frontend qua quy trình Gọi ý sản phẩm (Recommendation Service).
+- Tích hợp vòng lặp (Close the loop): Mang dữ liệu từ Data Lake cung cấp lại cho Frontend qua quy trình Gợi ý sản phẩm (Recommendation Service).
 
 ## 🏗️ Kiến trúc Tổng thể (Architecture)
 *(Sơ đồ kiến trúc tổng thể - Đã chốt cho báo cáo cuối kỳ)*
