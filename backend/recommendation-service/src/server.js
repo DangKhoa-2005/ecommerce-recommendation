@@ -78,6 +78,79 @@ function scoreFrom(...values) {
   );
 }
 
+function scoreForItem(item) {
+  const candidates = [
+    item?.score,
+    item?.predicted_rating,
+    item?.lift,
+    item?.confidence
+  ];
+  return Number(
+    candidates
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+      .sort((a, b) => b - a)[0] || 0
+  );
+}
+
+function pickDiverseRecommendations(items, maxItems = 4, perCategory = 2) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return [];
+  }
+
+  const buckets = new Map();
+  for (const item of items) {
+    const category = String(item?.category || "unknown").trim().toLowerCase();
+    const list = buckets.get(category) || [];
+    list.push(item);
+    buckets.set(category, list);
+  }
+
+  const categoryOrder = [...buckets.entries()]
+    .map(([category, list]) => ({
+      category,
+      score: Math.max(...list.map(scoreForItem))
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const selected = [];
+  const selectedIds = new Set();
+
+  for (const { category } of categoryOrder) {
+    if (selected.length >= maxItems) break;
+    const list = (buckets.get(category) || []).slice().sort((a, b) => scoreForItem(b) - scoreForItem(a));
+    let count = 0;
+    for (const item of list) {
+      if (selected.length >= maxItems) break;
+      const key = String(item.product_id || item.id || "");
+      if (!key || selectedIds.has(key)) continue;
+      if (count >= perCategory) break;
+      selected.push(item);
+      selectedIds.add(key);
+      count += 1;
+    }
+  }
+
+  if (selected.length < maxItems) {
+    const remaining = items
+      .filter((item) => {
+        const key = String(item.product_id || item.id || "");
+        return key && !selectedIds.has(key);
+      })
+      .sort((a, b) => scoreForItem(b) - scoreForItem(a));
+
+    for (const item of remaining) {
+      if (selected.length >= maxItems) break;
+      const key = String(item.product_id || item.id || "");
+      if (!key || selectedIds.has(key)) continue;
+      selected.push(item);
+      selectedIds.add(key);
+    }
+  }
+
+  return selected;
+}
+
 async function fetchProductsByCategories(categories, limitPerCategory = 2) {
   // Read real seeded products from order-service so card names/images match Mongo data.
   if (!categories || categories.length === 0) {
@@ -318,13 +391,23 @@ async function buildHybridUserPayload(localUserId) {
   }
 
   const relatedCategories = [...signalByCategory.keys()];
+  const candidateCategories = uniqueBy(
+    [...relatedCategories, ...cfCategories],
+    (value) => String(value || "").trim().toLowerCase()
+  ).filter(Boolean);
+
+  for (const category of candidateCategories) {
+    if (!signalByCategory.has(category)) {
+      signalByCategory.set(category, { confidence: 0, lift: 0, support: 0 });
+    }
+  }
   const relatedProducts = [];
 
-  if (relatedCategories.length) {
-    const relatedLookup = await fetchProductLookup(relatedCategories);
+  if (candidateCategories.length) {
+    const relatedLookup = await fetchProductLookup(candidateCategories);
     const productsByCategory = new Map();
 
-    for (const category of relatedCategories) {
+    for (const category of candidateCategories) {
       const response = await axios.get(`${ORDER_SERVICE_URL}/products`, {
         params: { category },
         timeout: 10000
@@ -333,7 +416,7 @@ async function buildHybridUserPayload(localUserId) {
       productsByCategory.set(category, response.data?.products || []);
     }
 
-    for (const category of relatedCategories) {
+    for (const category of candidateCategories) {
       const signal = signalByCategory.get(category) || { confidence: 0, lift: 0, support: 0 };
       const categoryProducts = productsByCategory.get(category) || [];
 
@@ -358,13 +441,14 @@ async function buildHybridUserPayload(localUserId) {
     }
   }
 
-  const data = uniqueBy([...directProducts, ...relatedProducts], (item) => item.product_id).sort((left, right) => {
+  const ranked = uniqueBy([...directProducts, ...relatedProducts], (item) => item.product_id).sort((left, right) => {
     if (right.score !== left.score) {
       return right.score - left.score;
     }
 
     return String(left.name || "").localeCompare(String(right.name || ""), "vi");
   });
+  const data = pickDiverseRecommendations(ranked, 4, 2);
 
   return {
     source: "databricks_hybrid",
@@ -657,6 +741,17 @@ app.get("/recommendations/home/:userId", async (req, res) => {
 
 app.get("/recommendations/product/:productId", async (req, res) => {
   const originalProductId = req.params.productId;
+  const originalProductIdNormalized = normalizeProductId(originalProductId);
+
+  const isOriginalProduct = (prod) => {
+    if (!prod) return false;
+    const prodId = String(prod._id?.$oid || prod._id || "");
+    const olistId = normalizeProductId(prod.olist_product_id);
+    return (
+      (prodId && prodId === originalProductId) ||
+      (olistId && (olistId === originalProductId || olistId === originalProductIdNormalized))
+    );
+  };
 
   try {
     let productCategory = null;
@@ -763,7 +858,7 @@ app.get("/recommendations/product/:productId", async (req, res) => {
         for (const prod of catProducts) {
           if (selected.length >= MAX_RECS) break;
           const pid = normalizeProductId(prod.olist_product_id);
-          if (!pid || pid === normalizeProductId(originalProductId) || selectedIds.has(pid)) continue;
+          if (!pid || selectedIds.has(pid) || isOriginalProduct(prod)) continue;
           const cnt = categoryCounts.get(category) || 0;
           if (cnt >= PER_CATEGORY_LIMIT) break;
           const sig = signalByCategory.get(category) || { confidence: 0, lift: 0, support: 0 };
@@ -791,7 +886,7 @@ app.get("/recommendations/product/:productId", async (req, res) => {
         for (const prod of sameProducts) {
           if (selected.length >= MAX_RECS) break;
           const pid = normalizeProductId(prod.olist_product_id);
-          if (!pid || pid === normalizeProductId(originalProductId) || selectedIds.has(pid)) continue;
+          if (!pid || selectedIds.has(pid) || isOriginalProduct(prod)) continue;
           selected.push({
             id: String(prod._id || pid),
             product_id: pid,
@@ -827,19 +922,22 @@ app.get("/recommendations/product/:productId", async (req, res) => {
 
     // If no AR rules found, fallback to top 3 products from the same category
     console.warn(`No AR rules found for category ${productCategory}, fetching top products from same category`);
-    const topProducts = (await fetchProductsByCategories([productCategory], 3)).slice(0, 3).map((prod) => ({
-      id: String(prod._id || normalizeProductId(prod.olist_product_id)),
-      product_id: normalizeProductId(prod.olist_product_id),
-      name: prod.name,
-      category: prod.category,
-      price: Number(prod.price || 0),
-      stock: Number(prod.stock || 0),
-      image_url: prod.image_url,
-      recommendation_type: "top_products_same_category",
-      lift: 0.8,
-      confidence: 0.6,
-      support: 0.01
-    }));
+    const topProducts = (await fetchProductsByCategories([productCategory], 6))
+      .filter((prod) => !isOriginalProduct(prod))
+      .slice(0, 3)
+      .map((prod) => ({
+        id: String(prod._id || normalizeProductId(prod.olist_product_id)),
+        product_id: normalizeProductId(prod.olist_product_id),
+        name: prod.name,
+        category: prod.category,
+        price: Number(prod.price || 0),
+        stock: Number(prod.stock || 0),
+        image_url: prod.image_url,
+        recommendation_type: "top_products_same_category",
+        lift: 0.8,
+        confidence: 0.6,
+        support: 0.01
+      }));
 
     if (topProducts.length > 0) {
       return res.json({
