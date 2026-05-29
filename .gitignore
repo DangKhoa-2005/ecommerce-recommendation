@@ -1,0 +1,5 @@
+.env
+frontend/web-app/.env
+README.md
+RESTART_AND_VERIFY.md
+**/node_modules/
